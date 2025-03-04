@@ -44,7 +44,7 @@ static int reset_jtag(void)
 {
 	int retval;
 
-	tap_state_t states[2];
+	enum tap_state states[2];
 
 	const char *cp = "RESET";
 
@@ -1172,7 +1172,7 @@ static int dsp5680xx_read(struct target *t, target_addr_t a, uint32_t size,
 	dsp5680xx_context.flush = 0;
 	int counter = FLUSH_COUNT_READ_WRITE;
 
-	for (unsigned i = 0; i < count; i++) {
+	for (unsigned int i = 0; i < count; i++) {
 		if (--counter == 0) {
 			dsp5680xx_context.flush = 1;
 			counter = FLUSH_COUNT_READ_WRITE;

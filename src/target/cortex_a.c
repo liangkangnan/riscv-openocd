@@ -571,7 +571,7 @@ static int cortex_a_instr_read_data_r0_r1(struct arm_dpm *dpm,
 	return retval;
 }
 
-static int cortex_a_bpwp_enable(struct arm_dpm *dpm, unsigned index_t,
+static int cortex_a_bpwp_enable(struct arm_dpm *dpm, unsigned int index_t,
 	uint32_t addr, uint32_t control)
 {
 	struct cortex_a_common *a = dpm_to_a(dpm);
@@ -595,8 +595,7 @@ static int cortex_a_bpwp_enable(struct arm_dpm *dpm, unsigned index_t,
 	vr += 4 * index_t;
 	cr += 4 * index_t;
 
-	LOG_DEBUG("A: bpwp enable, vr %08x cr %08x",
-		(unsigned) vr, (unsigned) cr);
+	LOG_DEBUG("A: bpwp enable, vr %08" PRIx32 " cr %08" PRIx32, vr, cr);
 
 	retval = mem_ap_write_atomic_u32(a->armv7a_common.debug_ap,
 			vr, addr);
@@ -607,7 +606,7 @@ static int cortex_a_bpwp_enable(struct arm_dpm *dpm, unsigned index_t,
 	return retval;
 }
 
-static int cortex_a_bpwp_disable(struct arm_dpm *dpm, unsigned index_t)
+static int cortex_a_bpwp_disable(struct arm_dpm *dpm, unsigned int index_t)
 {
 	struct cortex_a_common *a = dpm_to_a(dpm);
 	uint32_t cr;
@@ -625,7 +624,7 @@ static int cortex_a_bpwp_disable(struct arm_dpm *dpm, unsigned index_t)
 	}
 	cr += 4 * index_t;
 
-	LOG_DEBUG("A: bpwp disable, cr %08x", (unsigned) cr);
+	LOG_DEBUG("A: bpwp disable, cr %08" PRIx32, cr);
 
 	/* clear control register */
 	return mem_ap_write_atomic_u32(a->armv7a_common.debug_ap, cr, 0);
@@ -1325,21 +1324,21 @@ static int cortex_a_set_breakpoint(struct target *target,
 			brp_list[brp_i].value);
 	} else if (breakpoint->type == BKPT_SOFT) {
 		uint8_t code[4];
-		/* length == 2: Thumb breakpoint */
-		if (breakpoint->length == 2)
+		if (breakpoint->length == 2) {
+			/* length == 2: Thumb breakpoint */
 			buf_set_u32(code, 0, 32, ARMV5_T_BKPT(0x11));
-		else
-		/* length == 3: Thumb-2 breakpoint, actual encoding is
-		 * a regular Thumb BKPT instruction but we replace a
-		 * 32bit Thumb-2 instruction, so fix-up the breakpoint
-		 * length
-		 */
-		if (breakpoint->length == 3) {
+		} else if (breakpoint->length == 3) {
+			/* length == 3: Thumb-2 breakpoint, actual encoding is
+			 * a regular Thumb BKPT instruction but we replace a
+			 * 32bit Thumb-2 instruction, so fix-up the breakpoint
+			 * length
+			 */
 			buf_set_u32(code, 0, 32, ARMV5_T_BKPT(0x11));
 			breakpoint->length = 4;
-		} else
+		} else {
 			/* length == 4, normal ARM breakpoint */
 			buf_set_u32(code, 0, 32, ARMV5_BKPT(0x11));
+		}
 
 		retval = target_read_memory(target,
 				breakpoint->address & 0xFFFFFFFE,
@@ -1349,8 +1348,7 @@ static int cortex_a_set_breakpoint(struct target *target,
 			return retval;
 
 		/* make sure data cache is cleaned & invalidated down to PoC */
-		armv7a_cache_flush_virt(target, breakpoint->address,
-						breakpoint->length);
+		armv7a_cache_flush_virt(target, breakpoint->address, breakpoint->length);
 
 		retval = target_write_memory(target,
 				breakpoint->address & 0xFFFFFFFE,
@@ -1359,10 +1357,8 @@ static int cortex_a_set_breakpoint(struct target *target,
 			return retval;
 
 		/* update i-cache at breakpoint location */
-		armv7a_l1_d_cache_inval_virt(target, breakpoint->address,
-					breakpoint->length);
-		armv7a_l1_i_cache_inval_virt(target, breakpoint->address,
-						 breakpoint->length);
+		armv7a_l1_d_cache_inval_virt(target, breakpoint->address, breakpoint->length);
+		armv7a_l1_i_cache_inval_virt(target, breakpoint->address, breakpoint->length);
 
 		breakpoint->is_set = true;
 	}

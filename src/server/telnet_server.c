@@ -93,7 +93,7 @@ static int telnet_output(struct command_context *cmd_ctx, const char *line)
 	return telnet_outputline(connection, line);
 }
 
-static void telnet_log_callback(void *priv, const char *file, unsigned line,
+static void telnet_log_callback(void *priv, const char *file, unsigned int line,
 	const char *function, const char *string)
 {
 	struct connection *connection = priv;
@@ -570,7 +570,7 @@ static void telnet_auto_complete(struct connection *connection)
 		struct list_head lh;
 	};
 
-	LIST_HEAD(matches);
+	OOCD_LIST_HEAD(matches);
 
 	/* - user command sequence, either at line beginning
 	 *   or we start over after these characters ';', '[', '{'

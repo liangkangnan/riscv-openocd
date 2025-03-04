@@ -310,9 +310,9 @@ static void clock_tms_cs_out(struct mpsse_ctx *ctx, const uint8_t *out, unsigned
  *
  * @param goal_state is the destination state for the move.
  */
-static void move_to_state(tap_state_t goal_state)
+static void move_to_state(enum tap_state goal_state)
 {
-	tap_state_t start_state = tap_get_state();
+	enum tap_state start_state = tap_get_state();
 
 	/*	goal_state is 1/2 of a tuple/pair of states which allow convenient
 		lookup of the required TMS pattern to move to this state from the
@@ -371,7 +371,7 @@ static int ftdi_khz(int khz, int *jtag_speed)
 	return ERROR_OK;
 }
 
-static void ftdi_end_state(tap_state_t state)
+static void ftdi_end_state(enum tap_state state)
 {
 	if (tap_is_state_stable(state))
 		tap_set_end_state(state);
@@ -396,7 +396,7 @@ static void ftdi_execute_runtest(struct jtag_command *cmd)
 	unsigned int i = cmd->cmd.runtest->num_cycles;
 	while (i > 0) {
 		/* there are no state transitions in this code, so omit state tracking */
-		unsigned this_len = i > 7 ? 7 : i;
+		unsigned int this_len = i > 7 ? 7 : i;
 		DO_CLOCK_TMS_CS_OUT(mpsse_ctx, &zero, 0, this_len, false, ftdi_jtag_mode);
 		i -= this_len;
 	}
@@ -442,7 +442,7 @@ static void ftdi_execute_tms(struct jtag_command *cmd)
 
 static void ftdi_execute_pathmove(struct jtag_command *cmd)
 {
-	tap_state_t *path = cmd->cmd.pathmove->path;
+	enum tap_state *path = cmd->cmd.pathmove->path;
 	unsigned int num_states  = cmd->cmd.pathmove->num_states;
 
 	LOG_DEBUG_IO("pathmove: %u states, current: %s  end: %s", num_states,
@@ -450,7 +450,7 @@ static void ftdi_execute_pathmove(struct jtag_command *cmd)
 		tap_state_name(path[num_states-1]));
 
 	int state_count = 0;
-	unsigned bit_count = 0;
+	unsigned int bit_count = 0;
 	uint8_t tms_byte = 0;
 
 	LOG_DEBUG_IO("-");
@@ -519,7 +519,7 @@ static void ftdi_execute_scan(struct jtag_command *cmd)
 	ftdi_end_state(cmd->cmd.scan->end_state);
 
 	struct scan_field *field = cmd->cmd.scan->fields;
-	unsigned scan_size = 0;
+	unsigned int scan_size = 0;
 
 	for (unsigned int i = 0; i < cmd->cmd.scan->num_fields; i++, field++) {
 		scan_size += field->num_bits;
@@ -652,7 +652,7 @@ static void ftdi_execute_stableclocks(struct jtag_command *cmd)
 	 * the correct level and remain there during the scan */
 	while (num_cycles > 0) {
 		/* there are no state transitions in this code, so omit state tracking */
-		unsigned this_len = num_cycles > 7 ? 7 : num_cycles;
+		unsigned int this_len = num_cycles > 7 ? 7 : num_cycles;
 		DO_CLOCK_TMS_CS_OUT(mpsse_ctx, &tms, 0, this_len, false, ftdi_jtag_mode);
 		num_cycles -= this_len;
 	}
@@ -1126,7 +1126,7 @@ COMMAND_HANDLER(ftdi_handle_layout_signal_command)
 	uint16_t input_mask = 0;
 	bool invert_oe = false;
 	uint16_t oe_mask = 0;
-	for (unsigned i = 1; i < CMD_ARGC; i += 2) {
+	for (unsigned int i = 1; i < CMD_ARGC; i += 2) {
 		if (strcmp("-data", CMD_ARGV[i]) == 0) {
 			invert_data = false;
 			COMMAND_PARSE_NUMBER(u16, CMD_ARGV[i + 1], data_mask);
@@ -1255,7 +1255,7 @@ COMMAND_HANDLER(ftdi_handle_vid_pid_command)
 		CMD_ARGC -= 1;
 	}
 
-	unsigned i;
+	unsigned int i;
 	for (i = 0; i < CMD_ARGC; i += 2) {
 		COMMAND_PARSE_NUMBER(u16, CMD_ARGV[i], ftdi_vid[i >> 1]);
 		COMMAND_PARSE_NUMBER(u16, CMD_ARGV[i + 1], ftdi_pid[i >> 1]);

@@ -190,11 +190,11 @@ int riscv_batch_run_from(struct riscv_batch *batch, size_t start_idx,
 size_t riscv_batch_finished_scans(const struct riscv_batch *batch);
 
 /* Adds a DM register write to this batch. */
-void riscv_batch_add_dmi_write(struct riscv_batch *batch, uint64_t address, uint32_t data,
+void riscv_batch_add_dmi_write(struct riscv_batch *batch, uint32_t address, uint32_t data,
 	bool read_back, enum riscv_scan_delay_class delay_class);
 
 static inline void
-riscv_batch_add_dm_write(struct riscv_batch *batch, uint64_t address, uint32_t data,
+riscv_batch_add_dm_write(struct riscv_batch *batch, uint32_t address, uint32_t data,
 	bool read_back, enum riscv_scan_delay_class delay_type)
 {
 	return riscv_batch_add_dmi_write(batch,
@@ -205,18 +205,18 @@ riscv_batch_add_dm_write(struct riscv_batch *batch, uint64_t address, uint32_t d
 /* DM register reads must be handled in two parts: the first one schedules a read and
  * provides a key, the second one actually obtains the result of the read -
  * status (op) and the actual data. */
-size_t riscv_batch_add_dmi_read(struct riscv_batch *batch, uint64_t address,
+size_t riscv_batch_add_dmi_read(struct riscv_batch *batch, uint32_t address,
 		enum riscv_scan_delay_class delay_class);
 
 static inline size_t
-riscv_batch_add_dm_read(struct riscv_batch *batch, uint64_t address,
+riscv_batch_add_dm_read(struct riscv_batch *batch, uint32_t address,
 		enum riscv_scan_delay_class delay_type)
 {
 	return riscv_batch_add_dmi_read(batch,
 			riscv_get_dmi_address(batch->target, address), delay_type);
 }
 
-unsigned int riscv_batch_get_dmi_read_op(const struct riscv_batch *batch, size_t key);
+uint32_t riscv_batch_get_dmi_read_op(const struct riscv_batch *batch, size_t key);
 uint32_t riscv_batch_get_dmi_read_data(const struct riscv_batch *batch, size_t key);
 
 /* Scans in a NOP. */

@@ -109,7 +109,7 @@ int rtos_create(struct jim_getopt_info *goi, struct target *target)
 	Jim_Obj *res;
 	int e;
 
-	if (!goi->isconfigure && goi->argc != 0) {
+	if (!goi->is_configure && goi->argc != 0) {
 		Jim_WrongNumArgs(goi->interp, goi->argc, goi->argv, "NO PARAMS");
 		return JIM_ERR;
 	}
@@ -317,7 +317,7 @@ int rtos_qsymbol(struct connection *connection, char const *packet, int packet_s
 	reply_len += 2 * strlen(next_suffix);            /* hexify(..., next_suffix, ...) */
 	reply_len += 1;                                  /* Terminating NUL */
 	if (reply_len > sizeof(reply)) {
-		LOG_ERROR("ERROR: RTOS symbol '%s%s' name is too long for GDB!", next_sym->symbol_name, next_suffix);
+		LOG_ERROR("RTOS symbol '%s%s' name is too long for GDB", next_sym->symbol_name, next_suffix);
 		goto done;
 	}
 
@@ -397,7 +397,7 @@ int rtos_thread_packet(struct connection *connection, char const *packet, int pa
 		return ERROR_OK;
 	} else if (strncmp(packet, "qSymbol", 7) == 0) {
 		if (rtos_qsymbol(connection, packet, packet_size) == 1) {
-			if (target->rtos_auto_detect == true) {
+			if (target->rtos_auto_detect) {
 				target->rtos_auto_detect = false;
 				target->rtos->type->create(target);
 			}
@@ -635,7 +635,7 @@ int rtos_generic_stack_read(struct target *target,
 	int retval;
 
 	if (stack_ptr == 0) {
-		LOG_ERROR("Error: null stack pointer in thread");
+		LOG_ERROR("null stack pointer in thread");
 		return -5;
 	}
 	/* Read the stack */
