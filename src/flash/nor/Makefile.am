@@ -45,6 +45,7 @@ NOR_DRIVERS = \
 	%D%/max32xxx.c \
 	%D%/mdr.c \
 	%D%/msp432.c \
+	%D%/mspm0.c \
 	%D%/mrvlqspi.c \
 	%D%/niietcm4.c \
 	%D%/non_cfi.c \
@@ -58,7 +59,7 @@ NOR_DRIVERS = \
 	%D%/psoc6.c \
 	%D%/qn908x.c \
 	%D%/renesas_rpchf.c \
-	%D%/rp2040.c \
+	%D%/rp2xxx.c \
 	%D%/rsl10.c \
 	%D%/sfdp.c \
 	%D%/sh_qspi.c \

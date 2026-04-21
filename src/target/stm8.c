@@ -13,14 +13,12 @@
 #include <helper/log.h>
 #include "target.h"
 #include "target_type.h"
-#include "hello.h"
 #include "jtag/interface.h"
 #include "jtag/jtag.h"
 #include "jtag/swim.h"
 #include "register.h"
 #include "breakpoints.h"
 #include "algorithm.h"
-#include "stm8.h"
 
 static struct reg_cache *stm8_build_reg_cache(struct target *target);
 static int stm8_read_core_reg(struct target *target, unsigned int num);
@@ -53,6 +51,8 @@ static const struct {
 	{  4,  "sp", 16, REG_TYPE_UINT16, "general", "org.gnu.gdb.stm8.core", 0 },
 	{  5,  "cc", 8, REG_TYPE_UINT8, "general", "org.gnu.gdb.stm8.core", 0 },
 };
+
+#define STM8_COMMON_MAGIC	0x53544D38U
 
 #define STM8_NUM_REGS ARRAY_SIZE(stm8_regs)
 #define STM8_PC 0
@@ -167,6 +167,51 @@ struct stm8_comparator {
 	uint32_t reg_address;
 	enum hw_break_type type;
 };
+
+struct stm8_common {
+	unsigned int common_magic;
+
+	void *arch_info;
+	struct reg_cache *core_cache;
+	uint32_t core_regs[STM8_NUM_REGS];
+
+	/* working area for fastdata access */
+	struct working_area *fast_data_area;
+
+	bool swim_configured;
+	bool bp_scanned;
+	uint8_t num_hw_bpoints;
+	uint8_t num_hw_bpoints_avail;
+	struct stm8_comparator *hw_break_list;
+	uint32_t blocksize;
+	uint32_t flashstart;
+	uint32_t flashend;
+	uint32_t eepromstart;
+	uint32_t eepromend;
+	uint32_t optionstart;
+	uint32_t optionend;
+	bool enable_step_irq;
+
+	bool enable_stm8l;
+	uint32_t flash_cr2;
+	uint32_t flash_ncr2;
+	uint32_t flash_iapsr;
+	uint32_t flash_dukr;
+	uint32_t flash_pukr;
+
+	/* cc value used for interrupt flags restore */
+	uint32_t cc;
+	bool cc_valid;
+
+	/* register cache to processor synchronization */
+	int (*read_core_reg)(struct target *target, unsigned int num);
+	int (*write_core_reg)(struct target *target, unsigned int num);
+};
+
+static struct stm8_common *target_to_stm8(struct target *target)
+{
+	return target->arch_info;
+}
 
 static int stm8_adapter_read_memory(struct target *target,
 		uint32_t addr, int size, int count, void *buf)
@@ -980,9 +1025,9 @@ static int stm8_single_step_core(struct target *target)
 	return ERROR_OK;
 }
 
-static int stm8_resume(struct target *target, int current,
-		target_addr_t address, int handle_breakpoints,
-		int debug_execution)
+static int stm8_resume(struct target *target, bool current,
+		target_addr_t address, bool handle_breakpoints,
+		bool debug_execution)
 {
 	struct stm8_common *stm8 = target_to_stm8(target);
 	struct breakpoint *breakpoint = NULL;
@@ -1004,7 +1049,7 @@ static int stm8_resume(struct target *target, int current,
 		stm8_set_hwbreak(target, comparator_list);
 	}
 
-	/* current = 1: continue on current pc,
+	/* current = true: continue on current pc,
 	   otherwise continue at <address> */
 	if (!current) {
 		buf_set_u32(stm8->core_cache->reg_list[STM8_PC].value,
@@ -1106,8 +1151,7 @@ static int stm8_init_arch_info(struct target *target,
 	return ERROR_OK;
 }
 
-static int stm8_target_create(struct target *target,
-		Jim_Interp *interp)
+static int stm8_target_create(struct target *target)
 {
 
 	struct stm8_common *stm8 = calloc(1, sizeof(struct stm8_common));
@@ -1290,8 +1334,8 @@ static int stm8_arch_state(struct target *target)
 	return ERROR_OK;
 }
 
-static int stm8_step(struct target *target, int current,
-		target_addr_t address, int handle_breakpoints)
+static int stm8_step(struct target *target, bool current,
+		target_addr_t address, bool handle_breakpoints)
 {
 	LOG_DEBUG("%x " TARGET_ADDR_FMT " %x",
 		current, address, handle_breakpoints);
@@ -1305,7 +1349,7 @@ static int stm8_step(struct target *target, int current,
 		return ERROR_TARGET_NOT_HALTED;
 	}
 
-	/* current = 1: continue on current pc, otherwise continue at <address> */
+	/* current = true: continue on current pc, otherwise continue at <address> */
 	if (!current) {
 		buf_set_u32(stm8->core_cache->reg_list[STM8_PC].value, 0, 32, address);
 		stm8->core_cache->reg_list[STM8_PC].dirty = true;
@@ -1789,7 +1833,7 @@ static int stm8_run_and_wait(struct target *target, uint32_t entry_point,
 	/* This code relies on the target specific resume() and
 	   poll()->debug_entry() sequence to write register values to the
 	   processor and the read them back */
-	retval = target_resume(target, 0, entry_point, 0, 1);
+	retval = target_resume(target, false, entry_point, false, true);
 	if (retval != ERROR_OK)
 		return retval;
 

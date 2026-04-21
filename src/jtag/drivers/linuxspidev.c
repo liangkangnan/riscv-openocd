@@ -302,8 +302,20 @@ static int spidev_init(void)
 		return ERROR_JTAG_INIT_FAILED;
 	}
 
+	int ret;
 	// Set SPI mode.
-	int ret = ioctl(spi_fd, SPI_IOC_WR_MODE32, &spi_mode);
+#ifdef SPI_IOC_WR_MODE32
+	ret = ioctl(spi_fd, SPI_IOC_WR_MODE32, &spi_mode);
+#else
+	// Linux pre 3.15 does not support MODE32, use 8-bit ioctl
+	if (spi_mode & ~0xff) {
+		LOG_ERROR("SPI mode 0x%" PRIx32 ", system permits 8 bits only", spi_mode);
+		return ERROR_JTAG_INIT_FAILED;
+	}
+
+	uint8_t mode = (uint8_t)spi_mode;
+	ret = ioctl(spi_fd, SPI_IOC_WR_MODE, &mode);
+#endif
 	if (ret == -1) {
 		LOG_ERROR("Failed to set SPI mode 0x%" PRIx32, spi_mode);
 		return ERROR_JTAG_INIT_FAILED;
@@ -604,12 +616,10 @@ static const struct command_registration spidev_command_handlers[] = {
 	COMMAND_REGISTRATION_DONE
 };
 
-// Only SWD transport supported
-static const char *const spidev_transports[] = { "swd", NULL };
-
 struct adapter_driver linuxspidev_adapter_driver = {
 	.name = "linuxspidev",
-	.transports = spidev_transports,
+	.transport_ids = TRANSPORT_SWD,
+	.transport_preferred_id = TRANSPORT_SWD,
 	.commands = spidev_command_handlers,
 
 	.init = spidev_init,

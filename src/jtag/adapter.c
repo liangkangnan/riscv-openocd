@@ -16,6 +16,7 @@
 #include "minidriver.h"
 #include "interface.h"
 #include "interfaces.h"
+#include <helper/bits.h>
 #include <transport/transport.h>
 
 /**
@@ -24,7 +25,6 @@
  */
 
 struct adapter_driver *adapter_driver;
-const char * const jtag_only[] = { "jtag", NULL };
 
 enum adapter_clk_mode {
 	CLOCK_MODE_UNSELECTED = 0,
@@ -187,7 +187,6 @@ int adapter_init(struct command_context *cmd_ctx)
 int adapter_quit(void)
 {
 	if (is_adapter_initialized() && adapter_driver->quit) {
-		/* close the JTAG interface */
 		int result = adapter_driver->quit();
 		if (result != ERROR_OK)
 			LOG_ERROR("failed: %d", result);
@@ -380,7 +379,7 @@ done:
 
 COMMAND_HANDLER(handle_adapter_name)
 {
-	/* return the name of the interface */
+	/* return the name of the adapter driver */
 	/* TCL code might need to know the exact type... */
 	/* FUTURE: we allow this as a means to "set" the interface. */
 
@@ -392,51 +391,49 @@ COMMAND_HANDLER(handle_adapter_name)
 	return ERROR_OK;
 }
 
-COMMAND_HANDLER(adapter_transports_command)
+COMMAND_HANDLER(dump_adapter_driver_list)
 {
-	char **transports;
-	int retval;
-
-	retval = CALL_COMMAND_HANDLER(transport_list_parse, &transports);
-	if (retval != ERROR_OK)
-		return retval;
-
-	retval = allow_transports(CMD_CTX, (const char **)transports);
-
-	if (retval != ERROR_OK) {
-		for (unsigned int i = 0; transports[i]; i++)
-			free(transports[i]);
-		free(transports);
+	int max_len = 0;
+	for (unsigned int i = 0; adapter_drivers[i]; i++) {
+		int len = strlen(adapter_drivers[i]->name);
+		if (max_len < len)
+			max_len = len;
 	}
-	return retval;
+
+	for (unsigned int i = 0; adapter_drivers[i]; i++) {
+		const char *name = adapter_drivers[i]->name;
+		unsigned int transport_ids = adapter_drivers[i]->transport_ids;
+
+		command_print_sameline(CMD, "%-*s {", max_len, name);
+		for (unsigned int j = BIT(0); j & TRANSPORT_VALID_MASK; j <<= 1)
+			if (j & transport_ids)
+				command_print_sameline(CMD, " %s", transport_name(j));
+		command_print(CMD, " }");
+	}
+
+	return ERROR_OK;
 }
 
 COMMAND_HANDLER(handle_adapter_list_command)
 {
-	if (strcmp(CMD_NAME, "list") == 0 && CMD_ARGC > 0)
+	if (CMD_ARGC)
 		return ERROR_COMMAND_SYNTAX_ERROR;
 
-	command_print(CMD, "The following debug adapters are available:");
-	for (unsigned int i = 0; adapter_drivers[i]; i++) {
-		const char *name = adapter_drivers[i]->name;
-		command_print(CMD, "%u: %s", i + 1, name);
-	}
-
-	return ERROR_OK;
+	return CALL_COMMAND_HANDLER(dump_adapter_driver_list);
 }
 
 COMMAND_HANDLER(handle_adapter_driver_command)
 {
 	int retval;
 
-	/* check whether the interface is already configured */
+	/* check whether the adapter driver is already configured */
 	if (adapter_driver) {
-		LOG_WARNING("Interface already configured, ignoring");
+		LOG_WARNING("Adapter driver already configured, ignoring");
 		return ERROR_OK;
 	}
 
-	/* interface name is a mandatory argument */
-	if (CMD_ARGC != 1 || CMD_ARGV[0][0] == '\0')
+	/* adapter driver name is a mandatory argument */
+	if (CMD_ARGC != 1)
 		return ERROR_COMMAND_SYNTAX_ERROR;
 
 	for (unsigned int i = 0; adapter_drivers[i]; i++) {
@@ -451,15 +448,17 @@ COMMAND_HANDLER(handle_adapter_driver_command)
 
 		adapter_driver = adapter_drivers[i];
 
-		return allow_transports(CMD_CTX, adapter_driver->transports);
+		return allow_transports(CMD_CTX, adapter_driver->transport_ids,
+			adapter_driver->transport_preferred_id);
 	}
 
-	/* no valid interface was found (i.e. the configuration option,
-	 * didn't match one of the compiled-in interfaces
+	/* no valid adapter driver was found (i.e. the configuration option,
+	 * didn't match one of the compiled-in drivers
 	 */
-	LOG_ERROR("The specified debug interface was not found (%s)",
+	LOG_ERROR("The specified adapter driver was not found (%s)",
 				CMD_ARGV[0]);
-	CALL_COMMAND_HANDLER(handle_adapter_list_command);
+	command_print(CMD, "The following adapter drivers are available:");
+	CALL_COMMAND_HANDLER(dump_adapter_driver_list);
 	return ERROR_JTAG_INVALID_INTERFACE;
 }
 
@@ -1136,13 +1135,6 @@ static const struct command_registration adapter_command_handlers[] = {
 		.help = "srst adapter command group",
 		.usage = "",
 		.chain = adapter_srst_command_handlers,
-	},
-	{
-		.name = "transports",
-		.handler = adapter_transports_command,
-		.mode = COMMAND_CONFIG,
-		.help = "Declare transports the adapter supports.",
-		.usage = "transport ...",
 	},
 	{
 		.name = "usb",

@@ -145,6 +145,66 @@ typedef struct {
 	struct target *target;
 } target_list_t;
 
+struct ac_cache {
+	uint32_t *commands;
+	size_t size;
+};
+
+static int ac_cache_elem_comparator(const void *p_lhs, const void *p_rhs)
+{
+	uint32_t lhs = *(const uint32_t *)p_lhs;
+	uint32_t rhs = *(const uint32_t *)p_rhs;
+	if (lhs < rhs)
+		return -1;
+	if (lhs > rhs)
+		return 1;
+	return 0;
+}
+
+static struct ac_cache ac_cache_construct(void)
+{
+	struct ac_cache cache = {
+		cache.commands = NULL,
+		cache.size = 0,
+	};
+	return cache;
+}
+
+static void ac_cache_free(struct ac_cache *cache)
+{
+	free(cache->commands);
+	cache->commands = NULL;
+	cache->size = 0;
+}
+
+static void ac_cache_insert(struct ac_cache *cache, uint32_t command)
+{
+	assert(cache);
+
+	size_t old_size = cache->size;
+	size_t new_size = old_size + 1;
+	size_t entry_size = sizeof(*cache->commands);
+
+	uint32_t *commands = realloc(cache->commands, new_size * entry_size);
+	if (!commands) {
+		LOG_ERROR("Reallocation to %zu bytes failed", new_size * entry_size);
+		return;
+	}
+
+	commands[old_size] = command;
+	cache->commands = commands;
+	cache->size = new_size;
+
+	qsort(cache->commands, cache->size, entry_size,
+			ac_cache_elem_comparator);
+}
+
+static bool ac_cache_contains(const struct ac_cache *cache, uint32_t command)
+{
+	return bsearch(&command, cache->commands, cache->size,
+			sizeof(*cache->commands), ac_cache_elem_comparator);
+}
+
 typedef struct {
 	/* The indexed used to address this hart in its DM. */
 	unsigned int index;
@@ -175,12 +235,7 @@ typedef struct {
 	 */
 	struct riscv_scan_delays learned_delays;
 
-	bool abstract_read_csr_supported;
-	bool abstract_write_csr_supported;
-	bool abstract_read_fpr_supported;
-	bool abstract_write_fpr_supported;
-
-	yes_no_maybe_t has_aampostincrement;
+	struct ac_cache ac_not_supported_cache;
 
 	/* Some fields from hartinfo. */
 	uint8_t datasize;
@@ -483,6 +538,7 @@ static bool check_dbgbase_exists(struct target *target)
 {
 	uint32_t next_dm = 0;
 	unsigned int count = 1;
+	riscv013_info_t *info = get_info(target);
 
 	LOG_TARGET_DEBUG(target, "Searching for DM with DMI base address (dbgbase) = 0x%x", target->dbgbase);
 	while (1) {
@@ -495,6 +551,12 @@ static bool check_dbgbase_exists(struct target *target)
 		/* Check if it's last one in the chain. */
 		if (next_dm == 0) {
 			LOG_TARGET_ERROR(target, "Reached the end of DM chain (detected %u DMs in total).", count);
+			break;
+		}
+		if (next_dm >> info->abits) {
+			LOG_TARGET_ERROR(target, "The address of the next Debug Module does not fit into %u bits, "
+					"which is the width of the DMI bus address. This is a HW bug",
+					info->abits);
 			break;
 		}
 		/* Safety: Avoid looping forever in case of buggy nextdm values in the hardware. */
@@ -651,6 +713,30 @@ clear_cmderr:
 	return res;
 }
 
+enum riscv_debug_reg_ordinal get_cmdtype(uint32_t command)
+{
+	switch (get_field(command, DM_COMMAND_CMDTYPE)) {
+	case 0:
+		return AC_ACCESS_REGISTER_ORDINAL;
+	case 1:
+		return AC_QUICK_ACCESS_ORDINAL;
+	case 2:
+		return AC_ACCESS_MEMORY_ORDINAL;
+	default:
+		assert(false && "Unknown command type value");
+		return 0;
+	}
+}
+
+static void mark_command_as_unsupported(struct target *target, uint32_t command)
+{
+	LOG_TARGET_DEBUG(target, "Caching the abstract "
+			"command 0x%" PRIx32 " as not supported", command);
+	log_debug_reg(target, get_cmdtype(command),
+			command, __FILE__, __LINE__, __func__);
+	ac_cache_insert(&get_info(target)->ac_not_supported_cache, command);
+}
+
 int riscv013_execute_abstract_command(struct target *target, uint32_t command,
 		uint32_t *cmderr)
 {
@@ -684,6 +770,9 @@ int riscv013_execute_abstract_command(struct target *target, uint32_t command,
 
 	res = abstract_cmd_batch_check_and_clear_cmderr(target, batch,
 			abstractcs_read_key, cmderr);
+	if (res != ERROR_OK && *cmderr == CMDERR_NOT_SUPPORTED)
+		mark_command_as_unsupported(target, command);
+
 cleanup:
 	riscv_batch_free(batch);
 	return res;
@@ -829,38 +918,35 @@ uint32_t riscv013_access_register_command(struct target *target, uint32_t number
 	return command;
 }
 
+static bool is_command_unsupported(struct target *target, uint32_t command)
+{
+	bool unsupported = ac_cache_contains(&get_info(target)->ac_not_supported_cache, command);
+	if (!unsupported)
+		return false;
+
+	LOG_TARGET_DEBUG(target, "Abstract command 0x%"
+			PRIx32 " is cached as not supported", command);
+	log_debug_reg(target, get_cmdtype(command),
+			command, __FILE__, __LINE__, __func__);
+	return true;
+}
+
 static int register_read_abstract_with_size(struct target *target,
 		riscv_reg_t *value, enum gdb_regno number, unsigned int size)
 {
-	RISCV013_INFO(info);
-
-	if (number >= GDB_REGNO_FPR0 && number <= GDB_REGNO_FPR31 &&
-			!info->abstract_read_fpr_supported)
-		return ERROR_FAIL;
-	if (number >= GDB_REGNO_CSR0 && number <= GDB_REGNO_CSR4095 &&
-			!info->abstract_read_csr_supported)
-		return ERROR_FAIL;
 	/* The spec doesn't define abstract register numbers for vector registers. */
 	if (number >= GDB_REGNO_V0 && number <= GDB_REGNO_V31)
 		return ERROR_FAIL;
 
 	uint32_t command = riscv013_access_register_command(target, number, size,
 			AC_ACCESS_REGISTER_TRANSFER);
+	if (is_command_unsupported(target, command))
+		return ERROR_FAIL;
 
 	uint32_t cmderr;
 	int result = riscv013_execute_abstract_command(target, command, &cmderr);
-	if (result != ERROR_OK) {
-		if (cmderr == CMDERR_NOT_SUPPORTED) {
-			if (number >= GDB_REGNO_FPR0 && number <= GDB_REGNO_FPR31) {
-				info->abstract_read_fpr_supported = false;
-				LOG_TARGET_INFO(target, "Disabling abstract command reads from FPRs.");
-			} else if (number >= GDB_REGNO_CSR0 && number <= GDB_REGNO_CSR4095) {
-				info->abstract_read_csr_supported = false;
-				LOG_TARGET_INFO(target, "Disabling abstract command reads from CSRs.");
-			}
-		}
+	if (result != ERROR_OK)
 		return result;
-	}
 
 	if (value)
 		return read_abstract_arg(target, value, 0, size);
@@ -879,23 +965,17 @@ static int register_read_abstract(struct target *target, riscv_reg_t *value,
 static int register_write_abstract(struct target *target, enum gdb_regno number,
 		riscv_reg_t value)
 {
-	RISCV013_INFO(info);
-
 	dm013_info_t *dm = get_dm(target);
 	if (!dm)
-		return ERROR_FAIL;
-
-	if (number >= GDB_REGNO_FPR0 && number <= GDB_REGNO_FPR31 &&
-			!info->abstract_write_fpr_supported)
-		return ERROR_FAIL;
-	if (number >= GDB_REGNO_CSR0 && number <= GDB_REGNO_CSR4095 &&
-			!info->abstract_write_csr_supported)
 		return ERROR_FAIL;
 
 	const unsigned int size_bits = register_size(target, number);
 	const uint32_t command = riscv013_access_register_command(target, number, size_bits,
 			AC_ACCESS_REGISTER_TRANSFER |
 			AC_ACCESS_REGISTER_WRITE);
+	if (is_command_unsupported(target, command))
+		return ERROR_FAIL;
+
 	LOG_DEBUG_REG(target, AC_ACCESS_REGISTER, command);
 	assert(size_bits % 32 == 0);
 	const unsigned int size_in_words = size_bits / 32;
@@ -915,18 +995,9 @@ static int register_write_abstract(struct target *target, enum gdb_regno number,
 	uint32_t cmderr;
 	res = abstract_cmd_batch_check_and_clear_cmderr(target, batch,
 			abstractcs_read_key, &cmderr);
+	if (res != ERROR_OK && cmderr == CMDERR_NOT_SUPPORTED)
+		mark_command_as_unsupported(target, command);
 
-	if (res != ERROR_OK) {
-		if (cmderr == CMDERR_NOT_SUPPORTED) {
-			if (number >= GDB_REGNO_FPR0 && number <= GDB_REGNO_FPR31) {
-				info->abstract_write_fpr_supported = false;
-				LOG_TARGET_INFO(target, "Disabling abstract command writes to FPRs.");
-			} else if (number >= GDB_REGNO_CSR0 && number <= GDB_REGNO_CSR4095) {
-				info->abstract_write_csr_supported = false;
-				LOG_TARGET_INFO(target, "Disabling abstract command writes to CSRs.");
-			}
-		}
-	}
 cleanup:
 	riscv_batch_free(batch);
 	return res;
@@ -1132,12 +1203,13 @@ static int scratch_reserve(struct target *target,
 	if (info->dataaccess == 1) {
 		/* Sign extend dataaddr. */
 		scratch->hart_address = info->dataaddr;
-		if (info->dataaddr & (1<<11))
-			scratch->hart_address |= 0xfffffffffffff000ULL;
+		if (info->dataaddr & BIT(DM_HARTINFO_DATAADDR_LENGTH - 1))
+			scratch->hart_address |=
+				GENMASK_ULL(riscv_xlen(target) - 1, DM_HARTINFO_DATAADDR_LENGTH);
 		/* Align. */
-		scratch->hart_address = (scratch->hart_address + alignment - 1) & ~(alignment - 1);
+		scratch->hart_address = ALIGN_UP(scratch->hart_address, alignment);
 
-		if ((size_bytes + scratch->hart_address - info->dataaddr + 3) / 4 >=
+		if (DIV_ROUND_UP(size_bytes + scratch->hart_address - info->dataaddr, 4) <=
 				info->datasize) {
 			scratch->memory_space = SPACE_DM_DATA;
 			scratch->debug_address = (scratch->hart_address - info->dataaddr) / 4;
@@ -1151,10 +1223,9 @@ static int scratch_reserve(struct target *target,
 
 	/* Allow for ebreak at the end of the program. */
 	unsigned int program_size = (program->instruction_count + 1) * 4;
-	scratch->hart_address = (info->progbuf_address + program_size + alignment - 1) &
-		~(alignment - 1);
+	scratch->hart_address = ALIGN_UP(info->progbuf_address + program_size, alignment);
 	if ((info->progbuf_writable == YNM_YES) &&
-			((size_bytes + scratch->hart_address - info->progbuf_address + 3) / 4 >=
+			(DIV_ROUND_UP(size_bytes + scratch->hart_address - info->progbuf_address, 4) <=
 			info->progbufsize)) {
 		scratch->memory_space = SPACE_DMI_PROGBUF;
 		scratch->debug_address = (scratch->hart_address - info->progbuf_address) / 4;
@@ -1164,8 +1235,7 @@ static int scratch_reserve(struct target *target,
 	/* Option 3: User-configured memory area as scratch RAM */
 	if (target_alloc_working_area(target, size_bytes + alignment - 1,
 				&scratch->area) == ERROR_OK) {
-		scratch->hart_address = (scratch->area->address + alignment - 1) &
-			~(alignment - 1);
+		scratch->hart_address = ALIGN_UP(scratch->area->address, alignment);
 		scratch->memory_space = SPACE_DMI_RAM;
 		scratch->debug_address = scratch->hart_address;
 		return ERROR_OK;
@@ -1709,6 +1779,10 @@ static void deinit_target(struct target *target)
 	if (!info)
 		return;
 
+	riscv013_info_t *vsinfo = info->version_specific;
+	if (vsinfo)
+		ac_cache_free(&vsinfo->ac_not_supported_cache);
+
 	riscv013_dm_free(target);
 
 	free(info->version_specific);
@@ -1956,6 +2030,11 @@ static int examine(struct target *target)
 		return ERROR_FAIL;
 	}
 
+	if (info->abits == 0) {
+		LOG_TARGET_ERROR(target,
+				"dtmcs.abits is zero. Check JTAG connectivity/board power");
+		return ERROR_FAIL;
+	}
 	if (info->abits < RISCV013_DTMCS_ABITS_MIN) {
 		/* The requirement for minimum DMI address width of 7 bits is part of
 		 * the RISC-V Debug spec since Jan-20-2017 (commit 03df6ee7). However,
@@ -2530,8 +2609,8 @@ static int sample_memory_bus_v1(struct target *target,
 {
 	RISCV013_INFO(info);
 	unsigned int sbasize = get_field(info->sbcs, DM_SBCS_SBASIZE);
-	if (sbasize > 64) {
-		LOG_TARGET_ERROR(target, "Memory sampling is only implemented for sbasize <= 64.");
+	if (sbasize == 0 || sbasize > 64) {
+		LOG_TARGET_ERROR(target, "Memory sampling is only implemented for non-zero sbasize <= 64.");
 		return ERROR_NOT_IMPLEMENTED;
 	}
 
@@ -2819,17 +2898,7 @@ static int init_target(struct command_context *cmd_ctx,
 	info->progbufsize = -1;
 	reset_learned_delays(target);
 
-	/* Assume all these abstract commands are supported until we learn
-	 * otherwise.
-	 * TODO: The spec allows eg. one CSR to be able to be accessed abstractly
-	 * while another one isn't. We don't track that this closely here, but in
-	 * the future we probably should. */
-	info->abstract_read_csr_supported = true;
-	info->abstract_write_csr_supported = true;
-	info->abstract_read_fpr_supported = true;
-	info->abstract_write_fpr_supported = true;
-
-	info->has_aampostincrement = YNM_MAYBE;
+	info->ac_not_supported_cache = ac_cache_construct();
 
 	return ERROR_OK;
 }
@@ -3719,16 +3788,22 @@ read_memory_abstract(struct target *target, const riscv_mem_access_args_t args)
 {
 	assert(riscv_mem_access_is_read(args));
 
-	RISCV013_INFO(info);
-	bool use_aampostincrement = info->has_aampostincrement != YNM_NO;
-
 	memset(args.read_buffer, 0, args.count * args.size);
 
 	/* Convert the size (bytes) to width (bits) */
 	unsigned int width = args.size << 3;
 
-	/* Create the command (physical address, postincrement, read) */
-	uint32_t command = access_memory_command(target, false, width, use_aampostincrement, false);
+	uint32_t command = access_memory_command(target, /* virtual = */ false,
+			width, /* postincrement = */ true, /* is_write = */ false);
+	bool use_aampostincrement = !is_command_unsupported(target, command);
+	if (!use_aampostincrement)
+		/* It is already known that this abstract memory
+		 * access with aampostincrement=1 is not supported.
+		 * So try aampostincrement=0 right away.
+		 *
+		 * TODO: check if new command is supported  */
+		command = access_memory_command(target, /* virtual = */ false,
+				width, /* postincrement = */ false, /* is_write = */ false);
 
 	/* Execute the reads */
 	uint8_t *p = args.read_buffer;
@@ -3749,33 +3824,14 @@ read_memory_abstract(struct target *target, const riscv_mem_access_args_t args)
 		/* Execute the command */
 		uint32_t cmderr;
 		result = riscv013_execute_abstract_command(target, command, &cmderr);
-
-		/* TODO: we need to modify error handling here. */
-		/* NOTE: in case of timeout cmderr is set to CMDERR_NONE */
-		if (info->has_aampostincrement == YNM_MAYBE) {
-			if (result == ERROR_OK) {
-				/* Safety: double-check that the address was really auto-incremented */
-				riscv_reg_t new_address;
-				result = read_abstract_arg(target, &new_address, 1, riscv_xlen(target));
-				if (result != ERROR_OK)
-					return mem_access_result(MEM_ACCESS_FAILED_DM_ACCESS_FAILED);
-
-				if (new_address == args.address + args.size) {
-					LOG_TARGET_DEBUG(target, "aampostincrement is supported on this target.");
-					info->has_aampostincrement = YNM_YES;
-				} else {
-					LOG_TARGET_WARNING(target, "Buggy aampostincrement! Address not incremented correctly.");
-					info->has_aampostincrement = YNM_NO;
-				}
-			} else {
-				/* Try the same access but with postincrement disabled. */
-				command = access_memory_command(target, false, width, false, false);
-				result = riscv013_execute_abstract_command(target, command, &cmderr);
-				if (result == ERROR_OK) {
-					LOG_TARGET_DEBUG(target, "aampostincrement is not supported on this target.");
-					info->has_aampostincrement = YNM_NO;
-				}
-			}
+		if (use_aampostincrement && result != ERROR_OK &&
+					cmderr == CMDERR_NOT_SUPPORTED) {
+			LOG_TARGET_DEBUG(target, "Trying the same abstract memory "
+					"read command, but without aampostincrement");
+			use_aampostincrement = false;
+			command = access_memory_command(target, /* virtual = */ false,
+					width, /* postincrement = */ false, /* is_write = */ false);
+			result = riscv013_execute_abstract_command(target, command, &cmderr);
 		}
 
 		/* TODO:
@@ -3791,7 +3847,7 @@ read_memory_abstract(struct target *target, const riscv_mem_access_args_t args)
 			return mem_access_result(MEM_ACCESS_FAILED_DM_ACCESS_FAILED);
 		buf_set_u64(p, 0, 8 * args.size, value);
 
-		if (info->has_aampostincrement == YNM_YES)
+		if (use_aampostincrement)
 			updateaddr = false;
 		p += args.size;
 	}
@@ -3809,15 +3865,22 @@ write_memory_abstract(struct target *target, const riscv_mem_access_args_t args)
 {
 	assert(riscv_mem_access_is_write(args));
 
-	RISCV013_INFO(info);
 	int result = ERROR_OK;
-	bool use_aampostincrement = info->has_aampostincrement != YNM_NO;
 
 	/* Convert the size (bytes) to width (bits) */
 	unsigned int width = args.size << 3;
 
-	/* Create the command (physical address, postincrement, write) */
-	uint32_t command = access_memory_command(target, false, width, use_aampostincrement, true);
+	uint32_t command = access_memory_command(target, /* virtual = */ false,
+			width, /* postincrement = */ true, /* is_write = */ true);
+	bool use_aampostincrement = !is_command_unsupported(target, command);
+	if (!use_aampostincrement)
+		/* It is already known that this abstract memory
+		 * access with aampostincrement=1 is not supported.
+		 * So try aampostincrement=0 right away.
+		 *
+		 * TODO: check if new command is supported  */
+		command = access_memory_command(target, /* virtual = */ false,
+				width, /* postincrement = */ false, /* is_write = */ true);
 
 	/* Execute the writes */
 	const uint8_t *p = args.write_buffer;
@@ -3844,33 +3907,14 @@ write_memory_abstract(struct target *target, const riscv_mem_access_args_t args)
 		/* Execute the command */
 		uint32_t cmderr;
 		result = riscv013_execute_abstract_command(target, command, &cmderr);
-
-		/* TODO: we need to modify error handling here. */
-		/* NOTE: in case of timeout cmderr is set to CMDERR_NONE */
-		if (info->has_aampostincrement == YNM_MAYBE) {
-			if (result == ERROR_OK) {
-				/* Safety: double-check that the address was really auto-incremented */
-				riscv_reg_t new_address;
-				result = read_abstract_arg(target, &new_address, 1, riscv_xlen(target));
-				if (result != ERROR_OK)
-					return mem_access_result(MEM_ACCESS_FAILED_DM_ACCESS_FAILED);
-
-				if (new_address == args.address + args.size) {
-					LOG_TARGET_DEBUG(target, "aampostincrement is supported on this target.");
-					info->has_aampostincrement = YNM_YES;
-				} else {
-					LOG_TARGET_WARNING(target, "Buggy aampostincrement! Address not incremented correctly.");
-					info->has_aampostincrement = YNM_NO;
-				}
-			} else {
-				/* Try the same access but with postincrement disabled. */
-				command = access_memory_command(target, false, width, false, true);
-				result = riscv013_execute_abstract_command(target, command, &cmderr);
-				if (result == ERROR_OK) {
-					LOG_TARGET_DEBUG(target, "aampostincrement is not supported on this target.");
-					info->has_aampostincrement = YNM_NO;
-				}
-			}
+		if (use_aampostincrement && result != ERROR_OK &&
+					cmderr == CMDERR_NOT_SUPPORTED) {
+			LOG_TARGET_DEBUG(target, "Trying the same abstract memory "
+					"write command, but without aampostincrement");
+			use_aampostincrement = false;
+			command = access_memory_command(target, /* virtual = */ false,
+					width, /* postincrement = */ false, /* is_write = */ true);
+			result = riscv013_execute_abstract_command(target, command, &cmderr);
 		}
 
 		/* TODO:
@@ -3879,7 +3923,7 @@ write_memory_abstract(struct target *target, const riscv_mem_access_args_t args)
 		if (result != ERROR_OK)
 			return mem_access_result(MEM_ACCESS_SKIPPED_ABSTRACT_ACCESS_CMDERR);
 
-		if (info->has_aampostincrement == YNM_YES)
+		if (use_aampostincrement)
 			updateaddr = false;
 		p += args.size;
 	}
@@ -4962,7 +5006,7 @@ static int write_memory_progbuf_fill_progbuf(struct target *target, uint32_t siz
 	if (riscv_program_store(&program, GDB_REGNO_S1, GDB_REGNO_S0, 0, size) != ERROR_OK)
 		return ERROR_FAIL;
 
-	if (riscv_program_addi(&program, GDB_REGNO_S0, GDB_REGNO_S0, size) != ERROR_OK)
+	if (riscv_program_addi(&program, GDB_REGNO_S0, GDB_REGNO_S0, (int16_t)size) != ERROR_OK)
 		return ERROR_FAIL;
 
 	if (riscv_program_ebreak(&program) != ERROR_OK)
@@ -5338,9 +5382,12 @@ static enum riscv_halt_reason riscv013_halt_reason(struct target *target)
 
 static int riscv013_write_progbuf(struct target *target, unsigned int index, riscv_insn_t data)
 {
+	assert(index < RISCV013_MAX_PROGBUF_SIZE);
+
 	dm013_info_t *dm = get_dm(target);
 	if (!dm)
 		return ERROR_FAIL;
+
 	if (dm->progbuf_cache[index] != data) {
 		if (dm_write(target, DM_PROGBUF0 + index, data) != ERROR_OK)
 			return ERROR_FAIL;
