@@ -76,6 +76,7 @@ static uint16_t cmsis_dap_vid[MAX_USB_IDS + 1] = { 0 };
 static uint16_t cmsis_dap_pid[MAX_USB_IDS + 1] = { 0 };
 static int cmsis_dap_backend = -1;
 static bool swd_mode;
+static uint8_t cjtag_mode = 0;
 
 /* CMSIS-DAP General Commands */
 #define CMD_DAP_INFO              0x00
@@ -442,6 +443,27 @@ static int cmsis_dap_cmd_dap_swj_sequence(uint8_t s_len, const uint8_t *sequence
 	int retval = cmsis_dap_xfer(cmsis_dap_handle, 2 + DIV_ROUND_UP(s_len, 8));
 	if (retval != ERROR_OK || cmsis_dap_handle->response[1] != DAP_OK)
 		return ERROR_FAIL;
+
+	return ERROR_OK;
+}
+
+static int cmsis_dap_cmd_dap_cjtag_mode(void)
+{
+	uint8_t *command = cmsis_dap_handle->command;
+
+	// ID_DAP_Vendor1
+	command[0] = 0x81;
+
+	int retval = cmsis_dap_xfer(cmsis_dap_handle, 1);
+	if (retval != ERROR_OK) {
+		LOG_ERROR("CMSIS-DAP command CMD_CJTAG_MODE failed.");
+		return ERROR_JTAG_DEVICE_ERROR;
+	}
+
+	if (cmsis_dap_handle->response[1] != 0x1) {
+		LOG_ERROR("CMSIS-DAP failed to set in cJTAG mode");
+		return ERROR_JTAG_DEVICE_ERROR;
+	}
 
 	return ERROR_OK;
 }
@@ -1347,11 +1369,19 @@ static int cmsis_dap_init(void)
 			return ERROR_JTAG_DEVICE_ERROR;
 		}
 
-		retval = cmsis_dap_cmd_dap_connect(CONNECT_JTAG);
-		if (retval != ERROR_OK)
-			return retval;
+		if (cjtag_mode) {
+			retval = cmsis_dap_cmd_dap_cjtag_mode();
+			if (retval != ERROR_OK)
+				return retval;
 
-		LOG_INFO("CMSIS-DAP: Interface Initialised (JTAG)");
+			LOG_INFO("CMSIS-DAP: Interface Initialised (cJTAG)");
+		} else {
+			retval = cmsis_dap_cmd_dap_connect(CONNECT_JTAG);
+			if (retval != ERROR_OK)
+				return retval;
+
+			LOG_INFO("CMSIS-DAP: Interface Initialised (JTAG)");
+		}
 	}
 
 	/* Be conservative and suppress submitting multiple HID requests
@@ -2205,6 +2235,24 @@ COMMAND_HANDLER(cmsis_dap_handle_vid_pid_command)
 	return ERROR_OK;
 }
 
+COMMAND_HANDLER(cmsis_dap_handle_cjtag_mode_command)
+{
+	bool enable;
+
+	if (CMD_ARGC != 1) {
+		LOG_ERROR("CMSIS-DAP cjtag_mode failed.");
+		return ERROR_COMMAND_SYNTAX_ERROR;
+	}
+
+	COMMAND_PARSE_ON_OFF(CMD_ARGV[0], enable);
+
+	cjtag_mode = enable ? 1 : 0;
+
+	LOG_INFO("CMSIS-DAP: cjtag_mode = %d", cjtag_mode);
+
+	return ERROR_OK;
+}
+
 COMMAND_HANDLER(cmsis_dap_handle_backend_command)
 {
 	if (CMD_ARGC != 1)
@@ -2267,6 +2315,13 @@ static const struct command_registration cmsis_dap_subcommand_handlers[] = {
 		.mode = COMMAND_CONFIG,
 		.help = "the vendor ID and product ID of the CMSIS-DAP device",
 		.usage = "(vid pid)*",
+	},
+	{
+		.name = "cjtag_mode",
+		.handler = &cmsis_dap_handle_cjtag_mode_command,
+		.mode = COMMAND_CONFIG,
+		.usage = "",
+		.help = "set in cjtag mode",
 	},
 	{
 		.name = "backend",
